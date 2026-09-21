@@ -2,35 +2,156 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Conversions</title>
+
+<!-- The /exec URL redirects to script.googleusercontent.com, so both hosts get
+     warmed up before the fetch below actually needs them. Worth ~100-250ms on
+     a cold load, which is most loads inside an embedded report. -->
+<link rel="preconnect" href="https://script.google.com" crossorigin>
+<link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+
+<script>
+/* =========================================================
+   CONFIG  — and the first network request.
+
+   This block sits in <head> on purpose. It fires the data
+   request before the stylesheet and the rest of the script
+   have even been parsed, so the slowest part of the page
+   (Apps Script waking up) overlaps with everything else
+   instead of queueing behind it.
+   ---------------------------------------------------------
+   THREE THINGS CAN BE LOCKED VIA THE URL, INDEPENDENTLY:
+
+   ?city=Red%20Deer     — restrict to one city. The city is now
+                          also sent to the feed, so the browser
+                          only ever receives that city's rows.
+   ?view=metrics        — only the four metric cards.
+   ?view=submissions    — only the conversions list.
+   (no ?view=)          — the full hub: city tabs, period
+                          switcher, both panels, and the two
+                          "Copy link" buttons that build the
+                          embed URLs above.
+
+   PERIOD: with no period in the URL the page always opens on
+   DEFAULT_PERIOD below — the whole of the previous calendar
+   month, recalculated from the Alberta clock on every single
+   load. In September that is August; at midnight on 1 October
+   it becomes September, with nothing to change here.
+========================================================= */
+var LIVE_DATA_URL = "https://script.google.com/macros/s/AKfycbwMw3AH2gtuOkya2wlQ4QSZDXPlNY1aUYwyHYVsi9YUukpFESgnVvLRStWdj-yyXQD8/exec";
+var ACCESS_KEY    = "kcb-7f3a91c2";   // must match ACCESS_KEY in the Apps Script
+
+var CITIES     = ['Red Deer', 'Cochrane', 'Calgary'];
+var FORCE_CITY = '';                  // e.g. 'Red Deer' to pin this copy to one city
+
+var REPORTING_TIMEZONE = 'America/Edmonton';
+
+/* mode 'month', value 1 = last calendar month, start to finish.
+   value 0 = this month so far. mode 'range', value 6 = last 6 months. */
+var DEFAULT_PERIOD = { mode: 'month', value: 1 };
+
+/* true = ignore ?months= / ?start= / ?rangeMonths= in the URL entirely and
+   always open on DEFAULT_PERIOD. Leave false unless you want a hard lock. */
+var LOCK_TO_DEFAULT_PERIOD = false;
+
+var FETCH_TIMEOUT_MS = 45000;   // Apps Script cold starts can be slow; be patient
+var FETCH_RETRIES    = 2;       // then two quick retries before giving up
+var TOOLS_MIN_ROWS   = 6;       // show search + channel filters above this many rows
+
+/* ---- small helpers the boot fetch and the main script share ---- */
+var URLP = new URLSearchParams(location.search);
+
+function lockedCity(){
+  var wanted = (URLP.get('city') || FORCE_CITY || '').trim();
+  if (!wanted) return null;
+  for (var i = 0; i < CITIES.length; i++){
+    if (CITIES[i].toLowerCase() === wanted.toLowerCase()) return CITIES[i];
+  }
+  return null;
+}
+
+function currentView(){
+  var v = (URLP.get('view') || '').toLowerCase();
+  return (v === 'metrics' || v === 'submissions') ? v : 'all';
+}
+
+function periodParam(mode, value){
+  if (mode === 'custom'){
+    var p = String(value).split('|');
+    return 'start=' + encodeURIComponent(p[0]) + '&end=' + encodeURIComponent(p[1]);
+  }
+  return mode === 'range' ? 'rangeMonths=' + value : 'months=' + value;
+}
+
+function initialPeriod(){
+  if (LOCK_TO_DEFAULT_PERIOD) return { mode: DEFAULT_PERIOD.mode, value: DEFAULT_PERIOD.value };
+  var s = URLP.get('start'), e = URLP.get('end');
+  if (s && e) return { mode: 'custom', value: s + '|' + e };
+  var rm = URLP.get('rangeMonths');
+  if (rm) return { mode: 'range', value: Number(rm) };
+  var m = URLP.get('months');
+  if (m !== null && m !== '') return { mode: 'month', value: Number(m) };
+  return { mode: DEFAULT_PERIOD.mode, value: DEFAULT_PERIOD.value };
+}
+
+function feedUrl(mode, value, city){
+  var sep = LIVE_DATA_URL.indexOf('?') === -1 ? '?' : '&';
+  var u = LIVE_DATA_URL + sep + periodParam(mode, value);
+  if (ACCESS_KEY) u += '&key=' + encodeURIComponent(ACCESS_KEY);
+  if (city) u += '&city=' + encodeURIComponent(city);
+  return u;
+}
+
+/* Start the request now. The main script picks this up if it wants the same
+   URL, and quietly re-fetches if it doesn't or if this one failed. */
+var BOOT = (function(){
+  try {
+    var p = initialPeriod();
+    var u = feedUrl(p.mode, p.value, lockedCity());
+    return {
+      url: u,
+      used: false,
+      promise: fetch(u, { cache: 'no-store' }).then(function(r){
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+    };
+  } catch (err) { return null; }
+})();
+if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console clean
+</script>
+
 <style>
   /* ============================================================
-     Styled to sit alongside Agency Analytics' own report widgets:
-     white cards on a light grey canvas, a hairline border, a small
-     mark + label top-left, a grey badge top-right, and the figure
-     set large and centred in mid-grey. One "headline" card gets a
-     soft tint to match the way AA highlights its primary metric.
+     Sits alongside Agency Analytics' own report widgets: white
+     cards on a light grey canvas, hairline borders, a small mark
+     and label top-left, a grey badge top-right. The conversions
+     list is where this build spends its ink — each row carries its
+     channel colour on a rail, and opening one reveals the enquiry
+     as a quoted block with the details as labelled chips.
   ============================================================ */
   :root{
     --canvas:#F4F5F7;
     --panel:#FFFFFF;
     --line:#E3E5E9;
     --line-soft:#EDEFF2;
-    --figure:#4A4A4A;
+    --figure:#3F4550;
     --label:#6C7684;
     --muted:#98A0AB;
     --link:#2F7DD1;
     --shadow:0 1px 2px rgba(16,24,40,.04);
+    --shadow-open:0 4px 16px rgba(16,24,40,.07);
 
-    --direct:#4E7BB5;
-    --organic:#4B9E6B;
-    --paid:#E08B3C;
-    --other:#A2A9B4;
+    --direct:#4E7BB5;  --direct-bg:#E9F0F8;  --direct-ink:#375F8C;
+    --organic:#4B9E6B; --organic-bg:#E6F4EC; --organic-ink:#2F7350;
+    --paid:#E08B3C;    --paid-bg:#FBEEE1;    --paid-ink:#A2601F;
+    --other:#A2A9B4;   --other-bg:#EDEFF2;   --other-ink:#6C7684;
+
     --headline-bg:#E9F7EE;
     --headline-line:#CFEBD9;
 
-    --font:'Roboto',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    --font:'Roboto',-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;background:var(--canvas);font-family:var(--font);color:var(--figure);
@@ -91,57 +212,140 @@
   .badge{font-size:11px;color:var(--label);background:#EDEFF2;border-radius:3px;padding:2px 7px;line-height:1.6;}
   .metric.headline .badge{background:#DBF0E2;}
   .metric-figure{flex:1;display:flex;align-items:center;justify-content:center;
-    font-size:44px;font-weight:700;letter-spacing:-.02em;line-height:1;padding-top:8px;}
+    font-size:44px;font-weight:700;letter-spacing:-.02em;line-height:1;padding-top:8px;
+    font-variant-numeric:tabular-nums;}
   .metric-figure.zero{color:#C9CDD3;}
   .metric-error{grid-column:1/-1;background:var(--panel);border:1px solid var(--line);border-radius:4px;
     padding:30px 16px;text-align:center;color:var(--muted);font-size:13px;box-shadow:var(--shadow);}
+  .metric-error button{font-family:var(--font);font-size:12.5px;color:var(--link);background:none;
+    border:1px solid var(--line);border-radius:4px;padding:6px 13px;margin-top:11px;cursor:pointer;display:block;
+    margin-left:auto;margin-right:auto;}
+  .metric-error button:hover{border-color:#C9CED6;background:#FAFBFC;}
   @media (max-width:860px){ .metrics{grid-template-columns:repeat(2,1fr);} }
   @media (max-width:460px){ .metrics{grid-template-columns:1fr;} }
 
   /* ---------- panel ---------- */
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;overflow:hidden;box-shadow:var(--shadow);}
-  .panel-top{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  .panel-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
     padding:11px 14px;border-bottom:1px solid var(--line);}
-  .panel-top h2{font-size:13px;font-weight:500;color:var(--label);margin:0;}
-  .panel-top .count{font-size:11.5px;color:var(--muted);}
+  .panel-title{display:flex;align-items:center;gap:8px;min-width:0;}
+  .panel-title h2{font-size:13px;font-weight:500;color:var(--label);margin:0;white-space:nowrap;}
+  .count-pill{font-size:11.5px;color:var(--label);background:#EFF1F4;border-radius:20px;padding:2px 9px;
+    line-height:1.7;font-variant-numeric:tabular-nums;}
+  .panel-note{font-size:11.5px;color:var(--muted);}
 
-  /* ---------- submissions accordion ---------- */
-  .acc-item{border-bottom:1px solid var(--line-soft);}
-  .acc-item:last-child{border-bottom:none;}
-  .acc-head{width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;
-    background:none;border:none;text-align:left;font-family:var(--font);cursor:pointer;
-    padding:13px 14px;color:inherit;}
-  .acc-head:hover{background:#FAFBFC;}
-  .acc-head-left{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 auto;}
-  .acc-name{font-size:14px;font-weight:500;color:var(--figure);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .acc-service{font-size:12.5px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .acc-head-right{display:flex;align-items:center;gap:10px;flex:none;}
-  .acc-date{font-size:12.5px;color:var(--label);white-space:nowrap;font-variant-numeric:tabular-nums;}
-  .chev{color:var(--muted);transition:transform .2s ease;flex:none;}
-  .acc-item.open .chev{transform:rotate(180deg);}
-  .acc-body{max-height:0;overflow:hidden;transition:max-height .22s ease;}
-  .acc-body-inner{padding:0 14px 16px 14px;}
-  .rec-msg{font-size:13px;line-height:1.6;color:#5A6169;white-space:pre-wrap;word-break:break-word;max-width:74ch;}
-  .rec-msg.empty{color:var(--muted);font-style:italic;}
-  .rec-extra{font-size:11.5px;color:var(--muted);margin-top:8px;}
-  .tag{display:inline-block;font-size:11px;padding:3px 8px;border-radius:3px;line-height:1.5;flex:none;}
-  .tag.paid{background:#FBEEE1;color:#A2601F;}
-  .tag.organic{background:#E6F4EC;color:#2F7350;}
-  .tag.direct{background:#E9F0F8;color:#375F8C;}
-  .tag.other{background:#EDEFF2;color:#6C7684;}
-  @media (max-width:640px){
-    .acc-head{flex-wrap:wrap;row-gap:6px;}
-    .acc-head-right{width:100%;justify-content:space-between;}
+  /* ---------- list controls ---------- */
+  .panel-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .search{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
+    border-radius:20px;padding:5px 11px;min-width:190px;}
+  .search svg{color:var(--muted);flex:none;}
+  .search input{font-family:var(--font);font-size:12.5px;color:var(--figure);border:none;outline:none;
+    background:none;width:100%;padding:1px 0;}
+  .search input::placeholder{color:var(--muted);}
+  .search:focus-within{border-color:#BFCBDA;box-shadow:0 0 0 3px rgba(47,125,209,.09);}
+  .chips{display:flex;gap:5px;flex-wrap:wrap;}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--font);font-size:12px;color:var(--label);
+    background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:5px 11px;cursor:pointer;
+    line-height:1.4;transition:border-color .15s ease,background .15s ease;}
+  .chip:hover{border-color:#C9CED6;background:#FAFBFC;}
+  .chip .dot{width:7px;height:7px;border-radius:50%;flex:none;}
+  .chip .n{font-variant-numeric:tabular-nums;color:var(--muted);}
+  .chip.on{background:#EEF3F9;border-color:#CBDDF0;color:#2A5C8F;}
+  .chip.on .n{color:#2A5C8F;}
+  .ghost{font-family:var(--font);font-size:12.5px;color:var(--label);background:none;border:1px solid var(--line);
+    border-radius:20px;padding:5px 12px;cursor:pointer;white-space:nowrap;}
+  .ghost:hover{color:var(--figure);border-color:#C9CED6;background:#FAFBFC;}
+
+  /* ---------- day grouping ---------- */
+  .daygroup + .daygroup{border-top:1px solid var(--line-soft);}
+  .dayhead{display:flex;align-items:center;gap:10px;padding:11px 14px 7px;}
+  .dayhead .d{font-size:11.5px;color:var(--label);white-space:nowrap;letter-spacing:.01em;}
+  .dayhead .rule{flex:1;height:1px;background:var(--line-soft);}
+  .dayhead .n{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;}
+
+  /* ---------- a conversion ---------- */
+  .row{position:relative;margin:0 8px 6px;border:1px solid transparent;border-radius:8px;
+    transition:border-color .16s ease,background .16s ease,box-shadow .16s ease;}
+  .row::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:3px;
+    background:var(--c);opacity:0;transition:opacity .16s ease;}
+  .row:hover{background:#FBFCFD;border-color:var(--line-soft);}
+  .row:hover::before{opacity:.5;}
+  .row.open{background:var(--panel);border-color:var(--line);box-shadow:var(--shadow-open);}
+  .row.open::before{opacity:1;}
+  .row[data-b="direct"] {--c:var(--direct); --tint:var(--direct-bg); --ink:var(--direct-ink);}
+  .row[data-b="organic"]{--c:var(--organic);--tint:var(--organic-bg);--ink:var(--organic-ink);}
+  .row[data-b="paid"]   {--c:var(--paid);   --tint:var(--paid-bg);   --ink:var(--paid-ink);}
+  .row[data-b="other"]  {--c:var(--other);  --tint:var(--other-bg);  --ink:var(--other-ink);}
+
+  .row-head{width:100%;display:flex;align-items:center;gap:12px;background:none;border:none;
+    font-family:var(--font);text-align:left;cursor:pointer;padding:11px 12px;color:inherit;border-radius:8px;}
+  .avatar{flex:none;width:34px;height:34px;border-radius:50%;background:var(--tint);color:var(--ink);
+    display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600;letter-spacing:.02em;}
+  .row-main{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;gap:2px;}
+  .row-name{font-size:14px;font-weight:500;color:var(--figure);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .row-sub{font-size:12.5px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .row-sub.quiet{color:var(--muted);}
+  .row-meta{display:flex;align-items:center;gap:10px;flex:none;}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;line-height:1.5;padding:3px 9px;
+    border-radius:20px;background:var(--tint);color:var(--ink);white-space:nowrap;}
+  .pill .dot{width:6px;height:6px;border-radius:50%;background:var(--c);flex:none;}
+  .row-time{font-size:12.5px;color:var(--label);white-space:nowrap;font-variant-numeric:tabular-nums;}
+  .chev{color:var(--muted);transition:transform .22s cubic-bezier(.4,0,.2,1);flex:none;}
+  .row.open .chev{transform:rotate(180deg);color:var(--ink);}
+
+  .row-body{max-height:0;overflow:hidden;transition:max-height .24s cubic-bezier(.4,0,.2,1);}
+  .row-body-in{padding:2px 12px 14px 58px;}
+  @media (max-width:560px){ .row-body-in{padding-left:12px;} }
+
+  .quote{position:relative;font-size:13.5px;line-height:1.65;color:#4A5158;background:#FAFBFC;
+    border:1px solid var(--line-soft);border-left:3px solid var(--c);border-radius:0 8px 8px 0;
+    padding:11px 14px;white-space:pre-wrap;word-break:break-word;max-width:72ch;}
+  .quote.empty{color:var(--muted);background:none;border-style:dashed;border-left-style:solid;}
+
+  .facts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
+  .fact{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--label);
+    background:#F6F7F9;border-radius:6px;padding:4px 9px;line-height:1.5;max-width:100%;}
+  .fact svg{color:var(--muted);flex:none;}
+  .fact b{font-weight:500;color:var(--figure);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .fact.ad{background:var(--paid-bg);color:var(--paid-ink);}
+  .fact.ad svg{color:var(--paid-ink);}
+
+  .row-actions{margin-top:10px;}
+  .copyrec{font-family:var(--font);font-size:12px;color:var(--label);background:none;border:1px solid var(--line);
+    border-radius:6px;padding:5px 11px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;}
+  .copyrec:hover{color:var(--figure);border-color:#C9CED6;background:#FAFBFC;}
+  .copyrec.done{color:#2F7350;border-color:#CFEBD9;background:#F1FBF4;}
+
+  mark{background:#FDF0D0;color:inherit;border-radius:2px;padding:0 1px;}
+
+  .empty{padding:40px 16px 44px;text-align:center;color:var(--muted);font-size:13px;}
+  .empty svg{display:block;margin:0 auto 10px;color:#D3D8DE;}
+  .empty .lead{color:var(--label);font-size:13.5px;margin-bottom:3px;}
+
+  /* ---------- loading ---------- */
+  .sk{position:relative;overflow:hidden;background:#EEF0F3;border-radius:6px;}
+  .sk::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.7),transparent);animation:sweep 1.3s infinite;}
+  @keyframes sweep{to{transform:translateX(100%)}}
+  .sk-row{display:flex;align-items:center;gap:12px;padding:13px 20px;border-bottom:1px solid var(--line-soft);}
+  .sk-av{width:34px;height:34px;border-radius:50%;flex:none;}
+  .sk-lines{flex:1;display:flex;flex-direction:column;gap:7px;}
+  .sk-pill{width:74px;height:16px;border-radius:20px;flex:none;}
+
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none !important;}
+    .sk::after{animation:none;}
   }
-
-  .empty{padding:44px 16px;text-align:center;color:var(--muted);font-size:13px;}
-
+  @media (max-width:640px){
+    .row-head{flex-wrap:wrap;row-gap:8px;}
+    .row-meta{width:100%;justify-content:space-between;padding-left:46px;}
+  }
   :focus-visible{outline:2px solid var(--link);outline-offset:2px;}
 </style>
 </head>
 <body>
-<!-- shared gradient used by the small card mark, defined once so every
-     icon references the same id instead of minting its own defs block -->
+<!-- shared gradient for the small card mark, defined once so every icon
+     references the same id instead of minting its own defs block -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <linearGradient id="markGrad" x1="0" y1="0" x2="1" y2="1">
@@ -162,12 +366,12 @@
         </svg>
         <span id="copyMetricsLabel">Copy metrics link</span>
       </button>
-      <button class="copylink" id="copySubmissions" type="button" title="Copy a link that embeds only the submissions list">
+      <button class="copylink" id="copySubmissions" type="button" title="Copy a link that embeds only the conversions list">
         <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
           <path d="M8 12a4 4 0 0 0 5.66 0l2-2a4 4 0 1 0-5.66-5.66l-1 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
           <path d="M12 8a4 4 0 0 0-5.66 0l-2 2a4 4 0 1 0 5.66 5.66l1-1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
         </svg>
-        <span id="copySubmissionsLabel">Copy submissions link</span>
+        <span id="copySubmissionsLabel">Copy conversions link</span>
       </button>
     </div>
     <div class="periods" id="periods">
@@ -192,96 +396,54 @@
 
 <script>
 /* =========================================================
-   CONFIG
-   ---------------------------------------------------------
-   THREE THINGS CAN BE LOCKED VIA THE URL, INDEPENDENTLY:
-
-   ?city=Red%20Deer     — restrict the data to one city.
-                          (or hardcode FORCE_CITY below)
-   ?view=metrics        — show ONLY the four metric cards.
-                          No toolbar, no period switcher, no
-                          submissions list. Nothing else loads.
-   ?view=submissions    — show ONLY the submissions list (as a
-                          click-to-expand accordion). No toolbar,
-                          no metric cards.
-   (no ?view=)          — the full hub: city tabs, period
-                          switcher, both metric cards and the
-                          submissions list, plus two "Copy link"
-                          buttons that build the ?view= links
-                          above for whichever tab is selected.
-
-   So for one city there are three usable links: the plain
-   ?city=X hub (for your own review, with a period switcher), and
-   the two locked-down ?city=X&view=metrics / &view=submissions
-   links, which are what you actually paste into an iframe.
+   DATA
+   The feed is CRM conversions only — no analytics-session data,
+   no vendor names. Every number traces back to a real
+   conversion the CRM recorded.
 ========================================================= */
-const LIVE_DATA_URL = "https://script.google.com/macros/s/AKfycbwMw3AH2gtuOkya2wlQ4QSZDXPlNY1aUYwyHYVsi9YUukpFESgnVvLRStWdj-yyXQD8/exec";
-const ACCESS_KEY = "kcb-7f3a91c2";   // must match ACCESS_KEY in the Apps Script
-
-const CITIES = ['Red Deer', 'Cochrane', 'Calgary'];
-const FORCE_CITY = '';               // e.g. 'Red Deer' to pin this copy to one city
-
-const REPORTING_TIMEZONE = 'America/Edmonton';
-const DEFAULT_PERIOD = { mode: 'month', value: 1 };   // last month, by default
-
 const CHANNELS = [
-  { key: 'direct',  label: 'Direct',  color: 'var(--direct)'  },
-  { key: 'organic', label: 'Organic', color: 'var(--organic)' },
-  { key: 'paid',    label: 'Paid',    color: 'var(--paid)'    }
+  { key:'direct',  label:'Direct',  color:'var(--direct)'  },
+  { key:'organic', label:'Organic', color:'var(--organic)' },
+  { key:'paid',    label:'Paid',    color:'var(--paid)'    }
 ];
-const OTHER = { key: 'other', label: 'Other', color: 'var(--other)' };
+const OTHER = { key:'other', label:'Other', color:'var(--other)' };
 const ALL_CHANNELS = CHANNELS.concat([OTHER]);
-const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MONTHS    = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MONTHS_S  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const WEEKDAYS  = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
 const fmt = n => Number(n || 0).toLocaleString();
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const emptySplit = () => ({ direct: 0, organic: 0, paid: 0, other: 0 });
+const emptySplit = () => ({ direct:0, organic:0, paid:0, other:0 });
 
 const MARK = '<span class="mark" aria-hidden="true"><svg viewBox="0 0 20 20" width="16" height="16">'
   + '<rect width="20" height="20" rx="5" fill="url(#markGrad)"/>'
   + '<path d="M5 13.5 8.5 8l3 3.5L15 6" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'
   + '</svg></span>';
 
-const urlParams = new URLSearchParams(location.search);
-
-function lockedCity(){
-  const q = urlParams.get('city');
-  const wanted = (q || FORCE_CITY || '').trim();
-  if (!wanted) return null;
-  const hit = CITIES.filter(c => c.toLowerCase() === wanted.toLowerCase())[0];
-  return hit || null;
-}
-
-function currentView(){
-  const v = (urlParams.get('view') || '').toLowerCase();
-  return (v === 'metrics' || v === 'submissions') ? v : 'all';
-}
+const ICON = {
+  pin:  '<svg width="11" height="11" viewBox="0 0 20 20" fill="none"><path d="M10 18s6-5.2 6-9.6A6 6 0 0 0 4 8.4C4 12.8 10 18 10 18Z" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="8.4" r="2.1" stroke="currentColor" stroke-width="1.5"/></svg>',
+  camp: '<svg width="11" height="11" viewBox="0 0 20 20" fill="none"><path d="M3 8v4a1 1 0 0 0 1 1h2l6 3.5V3.5L6 7H4a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M15.5 7.5a3.6 3.6 0 0 1 0 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  form: '<svg width="11" height="11" viewBox="0 0 20 20" fill="none"><rect x="4" y="2.5" width="12" height="15" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M7.5 7h5M7.5 10.5h5M7.5 14h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  ad:   '<svg width="11" height="11" viewBox="0 0 20 20" fill="none"><path d="M4 3.5 8.2 16l2-4.4 4.4-1.7L4 3.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+  copy: '<svg width="12" height="12" viewBox="0 0 20 20" fill="none"><rect x="7" y="7" width="9.5" height="9.5" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M13 4.5H5.5A1.5 1.5 0 0 0 4 6v7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  search:'<svg width="13" height="13" viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.3" stroke="currentColor" stroke-width="1.7"/><path d="m13 13 3.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>'
+};
 
 const LOCKED = lockedCity();
 const VIEW = currentView();
-const state = { tab: LOCKED || 'All', payload: null };
+const state = { tab: LOCKED || 'All', payload: null, q: '', bucket: 'all', rowsAll: [] };
 
-// Apply the view lock to the DOM once, up front — nothing conditional
-// left in the render functions themselves, so an embed never briefly
-// flashes chrome it's about to hide.
+/* Apply the view lock up front so an embed never flashes chrome it's
+   about to hide. */
 if (VIEW !== 'all') {
   document.body.classList.add('embed');
   document.getElementById('toolbar').style.display = 'none';
   document.getElementById('daterange').style.display = 'none';
 }
-if (VIEW === 'metrics') {
-  document.getElementById('body').style.display = 'none';
-}
-if (VIEW === 'submissions') {
-  document.getElementById('metrics').style.display = 'none';
-}
+if (VIEW === 'metrics')     document.getElementById('body').style.display = 'none';
+if (VIEW === 'submissions') document.getElementById('metrics').style.display = 'none';
 
-/* =========================================================
-   DATA
-   The feed is CRM conversions only — no analytics-session data,
-   no vendor names. Every number here traces back to a real
-   conversion your CRM recorded.
-========================================================= */
 function normalize(raw){
   const p = JSON.parse(JSON.stringify(raw || {}));
   p.connected = raw && raw.connected !== false;
@@ -290,25 +452,49 @@ function normalize(raw){
   p.submissions = p.submissions || [];
   return p;
 }
-
 function rowsFor(tab){
-  const subs = state.payload.submissions || [];
+  const subs = (state.payload && state.payload.submissions) || [];
   if (tab === 'All') return subs;
   return subs.filter(s => String(s.city).toLowerCase() === tab.toLowerCase());
 }
-
 function splitFor(tab){
   const split = emptySplit();
   rowsFor(tab).forEach(s => { split[s.bucket] = (split[s.bucket] || 0) + 1; });
   return split;
 }
 
-function totalFor(tab){
-  return rowsFor(tab).length;
+/* =========================================================
+   DATES
+========================================================= */
+function todayThere(){
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: REPORTING_TIMEZONE, year:'numeric', month:'2-digit', day:'2-digit'
+  }).format(new Date());
+}
+function shiftIso(iso, days){
+  const p = iso.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1]-1, p[2]));
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0,10);
+}
+function dayHeading(iso){
+  if (!iso) return 'Date not recorded';
+  const t = todayThere();
+  if (iso === t) return 'Today';
+  if (iso === shiftIso(t, -1)) return 'Yesterday';
+  const p = iso.split('-').map(Number);
+  const wd = WEEKDAYS[new Date(Date.UTC(p[0], p[1]-1, p[2])).getUTCDay()];
+  const sameYear = String(p[0]) === t.slice(0,4);
+  return wd + ' ' + p[2] + ' ' + MONTHS[p[1]-1] + (sameYear ? '' : ' ' + p[0]);
+}
+function shortDate(iso){
+  if (!iso) return '';
+  const p = iso.split('-').map(Number);
+  return p[2] + ' ' + MONTHS_S[p[1]-1] + ' ' + p[0];
 }
 
 /* =========================================================
-   RENDER
+   RENDER — metrics
 ========================================================= */
 function renderTabs(){
   const el = document.getElementById('tabs');
@@ -319,12 +505,12 @@ function renderTabs(){
 }
 
 function renderMetrics(){
-  const total = totalFor(state.tab);
+  const rows = rowsFor(state.tab);
+  const total = rows.length;
   const split = splitFor(state.tab);
-  const anyOther = (split.other || 0) > 0;
-  const channels = anyOther ? ALL_CHANNELS : CHANNELS;
+  const channels = (split.other || 0) > 0 ? ALL_CHANNELS : CHANNELS;
 
-  const cards = [{ label: 'Conversions', n: total, color: null, badge: '', headline: true }].concat(
+  const cards = [{ label:'Conversions', n:total, color:null, badge:'', headline:true }].concat(
     channels.map(ch => ({
       label: ch.label,
       n: split[ch.key] || 0,
@@ -344,87 +530,299 @@ function renderMetrics(){
     </div>`).join('');
 }
 
-function longDate(iso){
-  if (!iso) return '';
-  const p = iso.split('-').map(Number);
-  return p[2] + ' ' + MONTHS[p[1] - 1] + ' ' + p[0];
+/* =========================================================
+   RENDER — conversions list
+========================================================= */
+function initials(name){
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '–';
+  if (parts.length === 1) return parts[0].slice(0,2).toUpperCase();
+  return (parts[0][0] + parts[parts.length-1][0]).toUpperCase();
+}
+function hl(text, q){
+  const s = String(text == null ? '' : text);
+  if (!q) return esc(s);
+  const low = s.toLowerCase(), needle = q.toLowerCase();
+  let out = '', at = 0, i = low.indexOf(needle);
+  while (i !== -1){
+    out += esc(s.slice(at, i)) + '<mark>' + esc(s.slice(i, i + needle.length)) + '</mark>';
+    at = i + needle.length;
+    i = low.indexOf(needle, at);
+  }
+  return out + esc(s.slice(at));
+}
+function matches(r, q){
+  if (!q) return true;
+  const hay = [r.name, r.service, r.message, r.campaign, r.source, r.city, r.form]
+    .filter(Boolean).join(' ').toLowerCase();
+  return hay.indexOf(q.toLowerCase()) !== -1;
 }
 
 function renderSubmissions(){
-  const rows = rowsFor(state.tab);
-  const list = rows.length
-    ? '<div>' + rows.map((r, i) => {
-        const extras = [];
-        if (r.campaign && r.campaign !== '(not set)') extras.push(r.campaign);
-        if (r.ad) extras.push('ad click');
-        if (r.form && r.form !== '(unknown form)') extras.push(r.form);
-        if (state.tab === 'All' && r.city) extras.unshift(r.city);
-        const hasMessage = !!(r.message && r.message.trim());
-        return `
-          <div class="acc-item" data-i="${i}">
-            <button class="acc-head" type="button" aria-expanded="false">
-              <span class="acc-head-left">
-                <span class="acc-name">${esc(r.name || 'Enquiry')}</span>
-                ${r.service ? `<span class="acc-service">${esc(r.service)}</span>` : ''}
-              </span>
-              <span class="acc-head-right">
-                <span class="tag ${esc(r.bucket)}">${esc(r.source)}</span>
-                <span class="acc-date">${esc(longDate(r.date))}, ${esc(r.time)}</span>
-                <svg class="chev" width="12" height="12" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                  <path d="M5 7.5 10 12.5 15 7.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </span>
-            </button>
-            <div class="acc-body">
-              <div class="acc-body-inner">
-                <div class="rec-msg${hasMessage ? '' : ' empty'}">${hasMessage ? esc(r.message) : 'No message included with this submission.'}</div>
-                ${extras.length ? `<div class="rec-extra">${esc(extras.join(' · '))}</div>` : ''}
-              </div>
-            </div>
-          </div>`;
-      }).join('') + '</div>'
-    : '<div class="empty">No conversions in this period.</div>';
+  const all = rowsFor(state.tab);
+  state.rowsAll = all;
+  state.q = ''; state.bucket = 'all';
+
+  const counts = { all: all.length, paid:0, organic:0, direct:0, other:0 };
+  all.forEach(r => { counts[r.bucket] = (counts[r.bucket] || 0) + 1; });
+
+  const chips = [{ key:'all', label:'All' }]
+    .concat(ALL_CHANNELS.filter(c => counts[c.key] > 0).map(c => ({ key:c.key, label:c.label, color:c.color })))
+    .map(c => `<button class="chip${c.key === 'all' ? ' on' : ''}" type="button" data-b="${c.key}">
+        ${c.color ? `<i class="dot" style="background:${c.color}"></i>` : ''}${esc(c.label)}
+        <span class="n">${fmt(counts[c.key])}</span>
+      </button>`).join('');
+
+  /* In the hub only: flag rows that no city tab will ever show, so a
+     mismatch between "All" and a city embed is visible rather than silent. */
+  let note = '';
+  if (VIEW === 'all' && state.tab === 'All'){
+    const orphans = all.filter(r => !CITIES.some(c => c.toLowerCase() === String(r.city).toLowerCase()));
+    if (orphans.length) note = `<span class="panel-note">${fmt(orphans.length)} not matched to a city tab</span>`;
+  }
+
+  const showTools = all.length >= TOOLS_MIN_ROWS;
 
   document.getElementById('body').innerHTML = `
     <div class="panel">
       <div class="panel-top">
-        <h2>${state.tab === 'All' ? 'Conversions' : esc(state.tab) + ' conversions'}</h2>
-        <span class="count">${fmt(rows.length)}</span>
+        <div class="panel-title">
+          <h2>${state.tab === 'All' ? 'Conversions' : esc(state.tab) + ' conversions'}</h2>
+          <span class="count-pill" id="subCount">${fmt(all.length)}</span>
+          ${note}
+        </div>
+        ${showTools ? `
+        <div class="panel-tools">
+          <label class="search">${ICON.search}
+            <input type="search" id="subSearch" placeholder="Search names, services, messages" aria-label="Search conversions">
+          </label>
+          <div class="chips" id="subChips">${chips}</div>
+          <button class="ghost" id="toggleAll" type="button">Expand all</button>
+        </div>` : ''}
       </div>
-      ${list}
+      <div id="list"></div>
     </div>`;
 
-  document.querySelectorAll('.acc-head').forEach(btn => {
+  const search = document.getElementById('subSearch');
+  if (search){
+    let t;
+    search.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => { state.q = search.value.trim(); renderList(); }, 70);
+    });
+  }
+  const chipBox = document.getElementById('subChips');
+  if (chipBox){
+    chipBox.addEventListener('click', e => {
+      const b = e.target.closest('.chip');
+      if (!b) return;
+      state.bucket = b.dataset.b;
+      chipBox.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === b));
+      renderList();
+    });
+  }
+  const toggle = document.getElementById('toggleAll');
+  if (toggle){
+    toggle.addEventListener('click', () => {
+      const items = Array.from(document.querySelectorAll('.row'));
+      const anyClosed = items.some(i => !i.classList.contains('open'));
+      items.forEach(i => anyClosed ? openRow(i) : closeRow(i));
+      toggle.textContent = anyClosed ? 'Collapse all' : 'Expand all';
+    });
+  }
+
+  renderList();
+}
+
+function renderList(){
+  const q = state.q;
+  const rows = state.rowsAll.filter(r =>
+    (state.bucket === 'all' || r.bucket === state.bucket) && matches(r, q));
+
+  const countEl = document.getElementById('subCount');
+  if (countEl){
+    countEl.textContent = rows.length === state.rowsAll.length
+      ? fmt(rows.length)
+      : fmt(rows.length) + ' of ' + fmt(state.rowsAll.length);
+  }
+
+  const list = document.getElementById('list');
+  if (!rows.length){
+    list.innerHTML = state.rowsAll.length
+      ? `<div class="empty"><div class="lead">Nothing matches that filter</div>Clear the search or pick another channel.</div>`
+      : `<div class="empty">
+           <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4.5" width="17" height="15" rx="3" stroke="currentColor" stroke-width="1.6"/><path d="M7.5 9.5h9M7.5 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+           <div class="lead">No conversions in this period</div>Pick a different date range to see earlier enquiries.</div>`;
+    postHeight();
+    return;
+  }
+
+  // Rows arrive newest first from the feed; group runs of the same day.
+  let html = '', currentDay = null, buffer = [], groups = [];
+  rows.forEach(r => {
+    if (r.date !== currentDay){ if (buffer.length) groups.push({ day:currentDay, rows:buffer }); currentDay = r.date; buffer = []; }
+    buffer.push(r);
+  });
+  if (buffer.length) groups.push({ day:currentDay, rows:buffer });
+
+  groups.forEach(g => {
+    html += `<div class="daygroup">
+      <div class="dayhead"><span class="d">${esc(dayHeading(g.day))}</span><span class="rule"></span><span class="n">${fmt(g.rows.length)}</span></div>
+      ${g.rows.map(rowHtml).join('')}
+    </div>`;
+  });
+  list.innerHTML = html;
+
+  list.querySelectorAll('.row-head').forEach(btn => {
     btn.addEventListener('click', () => {
-      const item = btn.closest('.acc-item');
-      const bodyEl = item.querySelector('.acc-body');
-      const isOpen = item.classList.contains('open');
-      if (isOpen) {
-        bodyEl.style.maxHeight = '0px';
-        item.classList.remove('open');
-        btn.setAttribute('aria-expanded', 'false');
-      } else {
-        bodyEl.style.maxHeight = bodyEl.scrollHeight + 'px';
-        item.classList.add('open');
-        btn.setAttribute('aria-expanded', 'true');
-      }
+      const item = btn.closest('.row');
+      item.classList.contains('open') ? closeRow(item) : openRow(item);
     });
   });
+  list.querySelectorAll('.copyrec').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const ok = await copyText(decodeURIComponent(btn.dataset.text));
+      btn.classList.toggle('done', ok);
+      const span = btn.querySelector('span');
+      const was = span.textContent;
+      span.textContent = ok ? 'Copied' : 'Could not copy';
+      setTimeout(() => { span.textContent = was; btn.classList.remove('done'); }, 1500);
+    });
+  });
+  postHeight();
+}
+
+function rowHtml(r){
+  const q = state.q;
+  const bucket = r.bucket || 'other';
+  const hasMessage = !!(r.message && r.message.trim());
+  const sub = [r.service, (state.tab === 'All' && r.city && r.city !== '(not set)') ? r.city : null]
+    .filter(Boolean);
+
+  const facts = [];
+  if (r.city && r.city !== '(not set)') facts.push(`<span class="fact">${ICON.pin}<b>${hl(r.city, q)}</b></span>`);
+  if (r.campaign && r.campaign !== '(not set)') facts.push(`<span class="fact">${ICON.camp}<b>${hl(r.campaign, q)}</b></span>`);
+  if (r.form && r.form !== '(unknown form)') facts.push(`<span class="fact">${ICON.form}<b>${hl(r.form, q)}</b></span>`);
+  if (r.ad) facts.push(`<span class="fact ad">${ICON.ad}<b>Arrived from an ad click</b></span>`);
+
+  const plain = [
+    r.name || 'Enquiry',
+    shortDate(r.date) + (r.time ? ', ' + r.time : ''),
+    r.source + (r.campaign && r.campaign !== '(not set)' ? ' — ' + r.campaign : ''),
+    r.city && r.city !== '(not set)' ? r.city : null,
+    r.service || null
+  ].filter(Boolean).join('\n')
+    + '\n\n' + (hasMessage ? r.message : 'No message included.');
+
+  return `
+    <div class="row" data-b="${esc(bucket)}">
+      <button class="row-head" type="button" aria-expanded="false">
+        <span class="avatar" aria-hidden="true">${esc(initials(r.name))}</span>
+        <span class="row-main">
+          <span class="row-name">${hl(r.name || 'Enquiry', q)}</span>
+          ${sub.length ? `<span class="row-sub">${hl(sub.join(' — '), q)}</span>`
+                       : `<span class="row-sub quiet">${hasMessage ? 'Message included' : 'No service selected'}</span>`}
+        </span>
+        <span class="row-meta">
+          <span class="pill"><i class="dot"></i>${hl(r.source, q)}</span>
+          <span class="row-time">${esc(r.time || '')}</span>
+          <svg class="chev" width="12" height="12" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M5 7.5 10 12.5 15 7.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+      </button>
+      <div class="row-body">
+        <div class="row-body-in">
+          <div class="quote${hasMessage ? '' : ' empty'}">${hasMessage ? hl(r.message, q) : 'No message came through with this submission.'}</div>
+          ${facts.length ? `<div class="facts">${facts.join('')}</div>` : ''}
+          <div class="row-actions">
+            <button class="copyrec" type="button" data-text="${encodeURIComponent(plain)}">${ICON.copy}<span>Copy this enquiry</span></button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* Expand/collapse. max-height is set to the measured height for the
+   animation, then released to none so a long message can never be
+   clipped if the iframe is resized while the row is open. */
+function openRow(item){
+  const b = item.querySelector('.row-body');
+  const head = item.querySelector('.row-head');
+  b.style.maxHeight = b.scrollHeight + 'px';
+  item.classList.add('open');
+  head.setAttribute('aria-expanded', 'true');
+  b.addEventListener('transitionend', function done(e){
+    if (e.propertyName !== 'max-height') return;
+    b.removeEventListener('transitionend', done);
+    if (item.classList.contains('open')) b.style.maxHeight = 'none';
+    postHeight();
+  });
+  postHeight();
+}
+function closeRow(item){
+  const b = item.querySelector('.row-body');
+  const head = item.querySelector('.row-head');
+  b.style.maxHeight = b.scrollHeight + 'px';
+  item.classList.remove('open');
+  head.setAttribute('aria-expanded', 'false');
+  requestAnimationFrame(() => requestAnimationFrame(() => { b.style.maxHeight = '0px'; postHeight(); }));
+}
+window.addEventListener('resize', () => {
+  document.querySelectorAll('.row.open .row-body').forEach(b => { b.style.maxHeight = 'none'; });
+  postHeight();
+});
+
+/* Tells a parent page how tall this is, for report tools that listen
+   for it. Silently does nothing everywhere else. */
+function postHeight(){
+  try{
+    if (window.parent === window) return;
+    window.parent.postMessage({ type:'kcb-conversions-height', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
+  }catch(err){}
+}
+
+/* =========================================================
+   LOADING STATE
+========================================================= */
+function renderSkeleton(){
+  if (VIEW !== 'submissions'){
+    document.getElementById('metrics').innerHTML = [0,1,2,3].map(() => `
+      <div class="metric">
+        <div class="metric-top"><span class="sk" style="width:86px;height:13px"></span><span class="sk" style="width:34px;height:15px"></span></div>
+        <div class="metric-figure"><span class="sk" style="width:64px;height:34px"></span></div>
+      </div>`).join('');
+  }
+  if (VIEW !== 'metrics'){
+    document.getElementById('body').innerHTML = `
+      <div class="panel">
+        <div class="panel-top"><div class="panel-title"><span class="sk" style="width:120px;height:13px"></span></div></div>
+        ${[0,1,2,3,4].map(() => `
+          <div class="sk-row">
+            <span class="sk sk-av"></span>
+            <span class="sk-lines"><span class="sk" style="width:38%;height:12px"></span><span class="sk" style="width:24%;height:10px"></span></span>
+            <span class="sk sk-pill"></span>
+          </div>`).join('')}
+      </div>`;
+  }
 }
 
 function showFeedError(message){
-  if (VIEW !== 'submissions') {
-    document.getElementById('metrics').innerHTML = '<div class="metric-error">' + esc(message) + '</div>';
+  const retry = `<button type="button" onclick="retryLoad()">Try again</button>`;
+  if (VIEW !== 'submissions'){
+    document.getElementById('metrics').innerHTML = '<div class="metric-error">' + esc(message) + retry + '</div>';
   }
-  if (VIEW !== 'metrics') {
-    document.getElementById('body').innerHTML = '<div class="panel"><div class="empty">' + esc(message) + '</div></div>';
+  if (VIEW !== 'metrics'){
+    document.getElementById('body').innerHTML = '<div class="panel"><div class="empty"><div class="lead">' + esc(message) + '</div>The report will fill in as soon as the feed answers.</div></div>';
   }
 }
 
 function renderAll(){
-  if (VIEW === 'all') { renderTabs(); updateCopyLinks(); }
+  if (VIEW === 'all'){ renderTabs(); updateCopyLinks(); }
   if (VIEW !== 'submissions') renderMetrics();
   if (VIEW !== 'metrics') renderSubmissions();
+  postHeight();
 }
 
 document.getElementById('tabs').addEventListener('click', e => {
@@ -435,10 +833,9 @@ document.getElementById('tabs').addEventListener('click', e => {
 });
 
 /* =========================================================
-   COPY-LINK — builds the two ?view= embed links (metrics /
-   submissions) for whichever tab is currently selected, and puts
-   whichever one is clicked onto the clipboard. Paste the result
-   straight into an iframe src.
+   COPY-LINK — builds the two ?view= embed links for whichever tab
+   is selected. Neither carries a period, so both always open on
+   last month.
 ========================================================= */
 function linkFor(view, tab){
   const url = new URL(location.href);
@@ -447,41 +844,30 @@ function linkFor(view, tab){
   url.searchParams.set('view', view);
   return url.toString();
 }
-
 function updateCopyLinks(){
   const suffix = state.tab === 'All' ? '' : ' (' + state.tab + ')';
   document.getElementById('copyMetricsLabel').textContent = 'Copy metrics link' + suffix;
-  document.getElementById('copySubmissionsLabel').textContent = 'Copy submissions link' + suffix;
+  document.getElementById('copySubmissionsLabel').textContent = 'Copy conversions link' + suffix;
 }
-
 async function copyText(text){
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch (err) {
-    try {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (err){
+    try{
       const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
       return true;
-    } catch (err2) {
-      return false;
-    }
+    } catch (err2){ return false; }
   }
 }
-
 function wireCopyButton(btnId, labelId, view){
   const btn = document.getElementById(btnId);
   const label = document.getElementById(labelId);
   btn.addEventListener('click', async () => {
     const ok = await copyText(linkFor(view, state.tab));
     const original = label.textContent;
-    label.textContent = ok ? 'Copied!' : 'Could not copy';
+    label.textContent = ok ? 'Copied' : 'Could not copy';
     btn.classList.toggle('done', ok);
     setTimeout(() => { label.textContent = original; btn.classList.remove('done'); }, 1600);
   });
@@ -494,6 +880,7 @@ wireCopyButton('copySubmissions', 'copySubmissionsLabel', 'submissions');
 ========================================================= */
 const cache = new Map();
 let seq = 0;
+let lastRequest = null;
 
 function setStatus(text, cls){
   const el = document.getElementById('status');
@@ -506,16 +893,32 @@ function markPeriod(mode, value){
     b.classList.toggle('on', b.dataset.mode === mode && (mode === 'custom' || Number(b.dataset.value) === value));
   });
 }
-function paramFor(mode, value){
-  if (mode === 'custom'){
-    const p = String(value).split('|');
-    return 'start=' + encodeURIComponent(p[0]) + '&end=' + encodeURIComponent(p[1]);
+
+async function fetchWithRetry(url){
+  let lastErr;
+  for (let attempt = 0; attempt <= FETCH_RETRIES; attempt++){
+    if (attempt) await new Promise(r => setTimeout(r, 600 * Math.pow(2, attempt - 1)));
+    let timer = null;
+    try{
+      const ctrl = ('AbortController' in window) ? new AbortController() : null;
+      if (ctrl) timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+      const res = await fetch(url, { cache:'no-store', signal: ctrl ? ctrl.signal : undefined });
+      if (timer) clearTimeout(timer);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      if (!json || json.ok === false) throw new Error((json && json.error) || 'Bad response');
+      return json;
+    } catch (err){
+      if (timer) clearTimeout(timer);
+      lastErr = err;
+    }
   }
-  return mode === 'range' ? 'rangeMonths=' + value : 'months=' + value;
+  throw lastErr;
 }
 
 async function load(mode, value){
   markPeriod(mode, value);
+  lastRequest = { mode, value };
   const key = mode + ':' + value;
   const mine = ++seq;
 
@@ -527,14 +930,19 @@ async function load(mode, value){
   }
 
   setStatus('Loading');
-  try {
-    const sep = LIVE_DATA_URL.indexOf('?') === -1 ? '?' : '&';
-    const url = LIVE_DATA_URL + sep + paramFor(mode, value) + (ACCESS_KEY ? '&key=' + encodeURIComponent(ACCESS_KEY) : '');
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
+  renderSkeleton();
+
+  const url = feedUrl(mode, value, LOCKED);
+  try{
+    let data = null;
+    if (BOOT && BOOT.url === url && !BOOT.used){
+      BOOT.used = true;
+      try { data = await BOOT.promise; } catch (err){ data = null; }
+    }
+    if (!data) data = await fetchWithRetry(url);
     if (!data || data.ok === false) throw new Error((data && data.error) || 'Bad response');
     if (mine !== seq) return;
+
     cache.set(key, data);
     state.payload = normalize(data);
     setStatus(state.payload.connected ? 'Live' : 'Not connected', state.payload.connected ? 'live' : 'bad');
@@ -543,8 +951,12 @@ async function load(mode, value){
     if (mine !== seq) return;
     console.warn('Feed unavailable:', err);
     setStatus('Not connected', 'bad');
-    showFeedError('The data feed did not respond.');
+    showFeedError('The conversions feed did not answer.');
   }
+}
+
+function retryLoad(){
+  if (lastRequest) load(lastRequest.mode, lastRequest.value);
 }
 
 document.querySelectorAll('#periods button').forEach(b => {
@@ -561,11 +973,6 @@ document.querySelectorAll('#periods button').forEach(b => {
 const from = document.getElementById('from');
 const to = document.getElementById('to');
 
-function todayThere(){
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: REPORTING_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit'
-  }).format(new Date());
-}
 function applyRange(){
   const err = document.getElementById('rangeErr');
   if (!from.value || !to.value){ err.textContent = 'Choose both dates.'; return; }
@@ -586,18 +993,11 @@ document.getElementById('apply').addEventListener('click', applyRange);
   to.value = t;
 })();
 
-/* Initial period: honours ?start=&end=, ?rangeMonths=, or ?months= on
-   the URL even in a locked embed (so an embed can be pinned to, say,
-   "this month" instead of the default last month), falling back to
-   DEFAULT_PERIOD when none of those are present. */
+/* Opens on last month unless the URL says otherwise — see initialPeriod()
+   in the head config block, which the boot fetch already used. */
 (function initialLoad(){
-  const start = urlParams.get('start'), end = urlParams.get('end');
-  if (start && end) { load('custom', start + '|' + end); return; }
-  const rangeMonths = urlParams.get('rangeMonths');
-  if (rangeMonths) { load('range', Number(rangeMonths)); return; }
-  const months = urlParams.get('months');
-  if (months !== null) { load('month', Number(months)); return; }
-  load(DEFAULT_PERIOD.mode, DEFAULT_PERIOD.value);
+  const p = initialPeriod();
+  load(p.mode, p.value);
 })();
 </script>
 </body>
