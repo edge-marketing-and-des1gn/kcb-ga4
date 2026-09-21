@@ -55,6 +55,11 @@ var DEFAULT_PERIOD = { mode: 'month', value: 1 };
    always open on DEFAULT_PERIOD. Leave false unless you want a hard lock. */
 var LOCK_TO_DEFAULT_PERIOD = false;
 
+/* The channel for someone who first arrived through an ad and came back
+   on their own to enquire. Rename it here and it changes everywhere. */
+var AD_RETURN_LABEL = 'Direct after ads';
+var AD_RETURN_PILL  = 'Direct, after an ad';
+
 var FETCH_TIMEOUT_MS = 45000;   // Apps Script cold starts can be slow; be patient
 var FETCH_RETRIES    = 2;       // then two quick retries before giving up
 var TOOLS_MIN_ROWS   = 6;       // show search + channel filters above this many rows
@@ -144,6 +149,7 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
     --shadow-open:0 4px 16px rgba(16,24,40,.07);
 
     --direct:#4E7BB5;  --direct-bg:#E9F0F8;  --direct-ink:#375F8C;
+    --adreturn:#8A6FC9; --adreturn-bg:#F0EAFA; --adreturn-ink:#5C4595;
     --organic:#4B9E6B; --organic-bg:#E6F4EC; --organic-ink:#2F7350;
     --paid:#E08B3C;    --paid-bg:#FBEEE1;    --paid-ink:#A2601F;
     --other:#A2A9B4;   --other-bg:#EDEFF2;   --other-ink:#6C7684;
@@ -201,7 +207,7 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
   .daterange .err{font-size:12px;color:#C0562C;align-self:center;}
 
   /* ---------- metric cards ---------- */
-  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:10px;margin-bottom:10px;}
   .metric{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:11px 13px 20px;
     display:flex;flex-direction:column;min-height:132px;box-shadow:var(--shadow);}
   .metric.headline{background:var(--headline-bg);border-color:var(--headline-line);}
@@ -221,7 +227,6 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
     border:1px solid var(--line);border-radius:4px;padding:6px 13px;margin-top:11px;cursor:pointer;display:block;
     margin-left:auto;margin-right:auto;}
   .metric-error button:hover{border-color:#C9CED6;background:#FAFBFC;}
-  @media (max-width:860px){ .metrics{grid-template-columns:repeat(2,1fr);} }
   @media (max-width:460px){ .metrics{grid-template-columns:1fr;} }
 
   /* ---------- panel ---------- */
@@ -273,6 +278,7 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
   .row.open{background:var(--panel);border-color:var(--line);box-shadow:var(--shadow-open);}
   .row.open::before{opacity:1;}
   .row[data-b="direct"] {--c:var(--direct); --tint:var(--direct-bg); --ink:var(--direct-ink);}
+  .row[data-b="adreturn"]{--c:var(--adreturn);--tint:var(--adreturn-bg);--ink:var(--adreturn-ink);}
   .row[data-b="organic"]{--c:var(--organic);--tint:var(--organic-bg);--ink:var(--organic-ink);}
   .row[data-b="paid"]   {--c:var(--paid);   --tint:var(--paid-bg);   --ink:var(--paid-ink);}
   .row[data-b="other"]  {--c:var(--other);  --tint:var(--other-bg);  --ink:var(--other-ink);}
@@ -307,8 +313,8 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
     background:#F6F7F9;border-radius:6px;padding:4px 9px;line-height:1.5;max-width:100%;}
   .fact svg{color:var(--muted);flex:none;}
   .fact b{font-weight:500;color:var(--figure);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .fact.ad{background:var(--paid-bg);color:var(--paid-ink);}
-  .fact.ad svg{color:var(--paid-ink);}
+  .fact.ad{background:var(--tint);color:var(--ink);}
+  .fact.ad svg{color:var(--ink);}
 
   .row-actions{margin-top:10px;}
   .copyrec{font-family:var(--font);font-size:12px;color:var(--label);background:none;border:1px solid var(--line);
@@ -401,20 +407,25 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
    no vendor names. Every number traces back to a real
    conversion the CRM recorded.
 ========================================================= */
-const CHANNELS = [
-  { key:'direct',  label:'Direct',  color:'var(--direct)'  },
-  { key:'organic', label:'Organic', color:'var(--organic)' },
-  { key:'paid',    label:'Paid',    color:'var(--paid)'    }
+/* Direct, Organic and Paid are always shown. The other two only appear
+   once they have something in them — "Direct after ads" was switched on
+   partway through, so older months have none. */
+const ALL_CHANNELS = [
+  { key:'direct',   label:'Direct',          color:'var(--direct)'   },
+  { key:'adreturn', label:AD_RETURN_LABEL,   color:'var(--adreturn)' },
+  { key:'organic',  label:'Organic',         color:'var(--organic)'  },
+  { key:'paid',     label:'Paid',            color:'var(--paid)'     },
+  { key:'other',    label:'Other',           color:'var(--other)'    }
 ];
-const OTHER = { key:'other', label:'Other', color:'var(--other)' };
-const ALL_CHANNELS = CHANNELS.concat([OTHER]);
+const ALWAYS_SHOWN = ['direct', 'organic', 'paid'];
+const channelLabel = r => r.bucket === 'adreturn' ? AD_RETURN_PILL : r.source;
 const MONTHS    = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const MONTHS_S  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const WEEKDAYS  = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
 const fmt = n => Number(n || 0).toLocaleString();
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const emptySplit = () => ({ direct:0, organic:0, paid:0, other:0 });
+const emptySplit = () => ({ direct:0, adreturn:0, organic:0, paid:0, other:0 });
 
 const MARK = '<span class="mark" aria-hidden="true"><svg viewBox="0 0 20 20" width="16" height="16">'
   + '<rect width="20" height="20" rx="5" fill="url(#markGrad)"/>'
@@ -508,7 +519,8 @@ function renderMetrics(){
   const rows = rowsFor(state.tab);
   const total = rows.length;
   const split = splitFor(state.tab);
-  const channels = (split.other || 0) > 0 ? ALL_CHANNELS : CHANNELS;
+  const channels = ALL_CHANNELS.filter(ch =>
+    ALWAYS_SHOWN.indexOf(ch.key) !== -1 || (split[ch.key] || 0) > 0);
 
   const cards = [{ label:'Conversions', n:total, color:null, badge:'', headline:true }].concat(
     channels.map(ch => ({
@@ -553,7 +565,7 @@ function hl(text, q){
 }
 function matches(r, q){
   if (!q) return true;
-  const hay = [r.name, r.service, r.message, r.campaign, r.source, r.city, r.form]
+  const hay = [r.name, r.service, r.message, r.campaign, r.source, channelLabel(r), r.city, r.form]
     .filter(Boolean).join(' ').toLowerCase();
   return hay.indexOf(q.toLowerCase()) !== -1;
 }
@@ -704,12 +716,13 @@ function rowHtml(r){
   if (r.city && r.city !== '(not set)') facts.push(`<span class="fact">${ICON.pin}<b>${hl(r.city, q)}</b></span>`);
   if (r.campaign && r.campaign !== '(not set)') facts.push(`<span class="fact">${ICON.camp}<b>${hl(r.campaign, q)}</b></span>`);
   if (r.form && r.form !== '(unknown form)') facts.push(`<span class="fact">${ICON.form}<b>${hl(r.form, q)}</b></span>`);
-  if (r.ad) facts.push(`<span class="fact ad">${ICON.ad}<b>Arrived from an ad click</b></span>`);
+  if (bucket === 'adreturn') facts.push(`<span class="fact ad">${ICON.ad}<b>Came back after an ad click</b></span>`);
+  else if (r.ad) facts.push(`<span class="fact ad">${ICON.ad}<b>Arrived from an ad click</b></span>`);
 
   const plain = [
     r.name || 'Enquiry',
     shortDate(r.date) + (r.time ? ', ' + r.time : ''),
-    r.source + (r.campaign && r.campaign !== '(not set)' ? ' — ' + r.campaign : ''),
+    channelLabel(r) + (r.campaign && r.campaign !== '(not set)' ? ' — ' + r.campaign : ''),
     r.city && r.city !== '(not set)' ? r.city : null,
     r.service || null
   ].filter(Boolean).join('\n')
@@ -725,7 +738,7 @@ function rowHtml(r){
                        : `<span class="row-sub quiet">${hasMessage ? 'Message included' : 'No service selected'}</span>`}
         </span>
         <span class="row-meta">
-          <span class="pill"><i class="dot"></i>${hl(r.source, q)}</span>
+          <span class="pill"><i class="dot"></i>${hl(channelLabel(r), q)}</span>
           <span class="row-time">${esc(r.time || '')}</span>
           <svg class="chev" width="12" height="12" viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <path d="M5 7.5 10 12.5 15 7.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
