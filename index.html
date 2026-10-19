@@ -10,6 +10,9 @@
      a cold load, which is most loads inside an embedded report. -->
 <link rel="preconnect" href="https://script.google.com" crossorigin>
 <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <script>
 /* =========================================================
@@ -347,6 +350,44 @@ if (BOOT) BOOT.promise.catch(function(){});   // claimed later; keep the console
     .row-meta{width:100%;justify-content:space-between;padding-left:46px;}
   }
   :focus-visible{outline:2px solid var(--link);outline-offset:2px;}
+
+  /* ============================================================
+     AGENCYANALYTICS LOOK (matches EDGE client reports)
+     Geist, #FDFDFD canvas, white cards with a hairline #EBEDF0
+     border and 10px corners, numbers in #555, black selected
+     controls. Overrides the tokens above; channel colours stay.
+  ============================================================ */
+  :root{
+    --canvas:#FDFDFD;
+    --panel:#FFFFFF;
+    --line:#EBEDF0;
+    --line-soft:#F1F2F4;
+    --figure:#555555;
+    --label:#71717A;
+    --muted:#A1A1AA;
+    --link:#171614;
+    --shadow:none;
+    --shadow-open:0 6px 18px rgba(20,25,30,.08);
+    --headline-bg:#FFFFFF;
+    --headline-line:#EBEDF0;
+    --font:'Geist','Helvetica Neue',Helvetica,Arial,sans-serif;
+  }
+  .tabs,.periods{border-radius:8px;border-width:.8px;}
+  .tabs button,.periods button{border-radius:6px;}
+  .tabs button.on,.periods button.on{background:#171614;color:#fff;font-weight:500;}
+  .copylink,.ghost,.chip{border-width:.8px;}
+  .chip.on{background:#171614;border-color:#171614;color:#fff;}
+  .chip.on .n{color:#fff;opacity:.75;}
+  .daterange,.metric,.metric-error,.panel{border-radius:10px;border-width:.8px;}
+  .daterange button{background:#171614;border-radius:6px;}
+  .daterange button:hover{background:#000;}
+  .metric-name{font-size:13px;font-weight:500;color:#171614;}
+  .metric-figure{font-weight:600;color:#555555;}
+  .metric.headline{box-shadow:inset 0 3px 0 #171614;}
+  .metric.headline .badge,.badge{background:#F4F4F5;color:#71717A;}
+  .panel-title h2{font-weight:600;color:#171614;font-size:14px;}
+  .search{border-width:.8px;}
+  .search:focus-within{border-color:#A1A1AA;box-shadow:0 0 0 3px rgba(23,22,20,.06);}
 </style>
 </head>
 <body>
